@@ -167,6 +167,25 @@ struct MarkdownContentView: View {
         case unorderedList([ListFragment])
         case orderedList([ListFragment])
         case blockquote([TextFragment])
+        case table(TableData)
+    }
+
+    enum ColumnAlignment {
+        case left, center, right
+    }
+
+    /// A single cell in a markdown table, with pre-parsed inline markdown.
+    struct TableCell: Identifiable {
+        let id: Int
+        let attributed: AttributedString?
+        let raw: String
+    }
+
+    struct TableData {
+        let headers: [TableCell]
+        let alignments: [ColumnAlignment]
+        let rows: [[TableCell]]
+        let columnCount: Int
     }
 
     /// A bounded piece of prose that can be laid out independently. Quotes use
@@ -314,6 +333,38 @@ struct MarkdownContentView: View {
                 continue
             }
 
+            if isTableRow(line) && i + 1 < lines.count && isTableSeparator(lines[i + 1]) {
+                let headerStrings = parseTableRow(line)
+                let columnCount = headerStrings.count
+                let alignments = parseTableSeparator(lines[i + 1], columnCount: columnCount)
+                let headers = headerStrings.enumerated().map { index, text in
+                    return TableCell(id: index, attributed: makeAttributed(text), raw: text)
+                }
+                i += 2
+                var rows: [[TableCell]] = []
+                var cellID = columnCount
+                while i < lines.count && isTableRow(lines[i]) {
+                    let cellStrings = parseTableRow(lines[i])
+                    // Pad short rows to match header column count
+                    let padded = padRow(cellStrings, to: columnCount)
+                    let cells = padded.map { text in
+                        let cell = TableCell(id: cellID, attributed: makeAttributed(text), raw: text)
+                        cellID += 1
+                        return cell
+                    }
+                    rows.append(cells)
+                    i += 1
+                }
+                blocks.append(Block(id: nextID, kind: .table(TableData(
+                    headers: headers,
+                    alignments: alignments,
+                    rows: rows,
+                    columnCount: columnCount
+                ))))
+                nextID += 1
+                continue
+            }
+
             if line.trimmingCharacters(in: .whitespaces).isEmpty {
                 i += 1
                 continue
@@ -326,6 +377,9 @@ struct MarkdownContentView: View {
                 let trimmed = current.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty || current.hasPrefix("```") || current.hasPrefix("#") ||
                    current.hasPrefix("> ") || current.hasPrefix("- ") || current.hasPrefix("* ") {
+                    break
+                }
+                if isTableRow(current) && i + 1 < lines.count && isTableSeparator(lines[i + 1]) {
                     break
                 }
                 paraLines.append(current)
@@ -438,6 +492,133 @@ struct MarkdownContentView: View {
         return chunks.isEmpty ? [code] : chunks
     }
 
+    private static func isTableRow(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return containsUnescapedPipe(trimmed)
+    }
+
+    private static func isTableSeparator(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard containsUnescapedPipe(trimmed) else { return false }
+        let cells = parseTableRow(trimmed)
+        return cells.allSatisfy { cell in
+            let c = cell.trimmingCharacters(in: .whitespaces)
+            return c.range(of: "^:?-+:?$", options: .regularExpression) != nil
+        }
+    }
+
+    /// Returns true if the string contains at least one `|` that is not
+    /// preceded by an odd number of backslashes (i.e., not escaped).
+    /// Handles `\\|` as escaped-backslash + pipe-separator.
+    private static func containsUnescapedPipe(_ text: String) -> Bool {
+        var backslashCount = 0
+        for char in text {
+            if char == "\\" {
+                backslashCount += 1
+            } else if char == "|" {
+                // Pipe is escaped only if preceded by an odd number of backslashes.
+                if backslashCount % 2 == 0 {
+                    return true
+                }
+                backslashCount = 0
+            } else {
+                backslashCount = 0
+            }
+        }
+        return false
+    }
+
+    /// Splits a markdown table row on unescaped `|` characters, strips leading
+    /// and trailing pipes, trims whitespace, and unescapes any `\|` sequences
+    /// so the resulting cells contain literal pipe characters where intended.
+    /// Handles `\\|` as escaped-backslash + pipe-separator.
+    private static func parseTableRow(_ line: String) -> [String] {
+        var trimmed = line.trimmingCharacters(in: .whitespaces)
+        // Strip leading pipe.
+        if trimmed.hasPrefix("|") {
+            trimmed = String(trimmed.dropFirst())
+        }
+        // Strip trailing pipe only if not escaped (odd number of backslashes before it).
+        if trimmed.hasSuffix("|") && !hasEscapedTrailingPipe(trimmed) {
+            trimmed = String(trimmed.dropLast())
+        }
+
+        var cells: [String] = []
+        var current = ""
+        var iterator = trimmed.makeIterator()
+
+        while let char = iterator.next() {
+            if char == "\\" {
+                // Check if next char is a pipe (escaped pipe).
+                if let next = iterator.next() {
+                    if next == "|" {
+                        current.append("|")
+                    } else {
+                        // Not an escaped pipe — keep both characters.
+                        current.append("\\")
+                        current.append(next)
+                    }
+                } else {
+                    // Trailing backslash — keep it.
+                    current.append("\\")
+                }
+            } else if char == "|" {
+                // Unescaped pipe — cell separator.
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        // Flush the last cell.
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        return cells
+    }
+
+    /// Returns true if the string ends with an escaped pipe (`\|` with an odd
+    /// number of preceding backslashes), meaning the trailing pipe should NOT
+    /// be stripped as a row delimiter.
+    private static func hasEscapedTrailingPipe(_ text: String) -> Bool {
+        guard text.hasSuffix("|") else { return false }
+        var backslashCount = 0
+        for char in text.dropLast().reversed() {
+            if char == "\\" {
+                backslashCount += 1
+            } else {
+                break
+            }
+        }
+        return backslashCount % 2 == 1
+    }
+
+    /// Pads a row to the expected column count by appending empty cells for
+    /// any missing columns, or truncating excess columns.
+    private static func padRow(_ cells: [String], to columnCount: Int) -> [String] {
+        if cells.count == columnCount {
+            return cells
+        } else if cells.count < columnCount {
+            return cells + Array(repeating: "", count: columnCount - cells.count)
+        } else {
+            return Array(cells.prefix(columnCount))
+        }
+    }
+
+    private static func parseTableSeparator(_ line: String, columnCount: Int) -> [ColumnAlignment] {
+        let cells = parseTableRow(line)
+        return cells.prefix(columnCount).map { cell in
+            let c = cell.trimmingCharacters(in: .whitespaces)
+            let leftColon = c.hasPrefix(":")
+            let rightColon = c.hasSuffix(":")
+            if leftColon && rightColon {
+                return .center
+            } else if rightColon {
+                return .right
+            } else {
+                return .left
+            }
+        }
+    }
+
     // MARK: - Render
 
     @ViewBuilder
@@ -477,6 +658,13 @@ struct MarkdownContentView: View {
                 fragments: fragments,
                 usesRetroTypography: usesRetroTypography
             )
+
+        case .table(let tableData):
+            MarkdownTableView(
+                tableData: tableData,
+                foregroundColor: foregroundColor,
+                usesRetroTypography: usesRetroTypography
+            )
         }
     }
 
@@ -497,6 +685,22 @@ private struct MarkdownInlineText: View {
     let fallback: String
     let foregroundColor: Color
     let usesRetroTypography: Bool
+    /// Optional font override. When nil, uses the default body font.
+    let fontOverride: Font?
+
+    init(
+        attributed: AttributedString?,
+        fallback: String,
+        foregroundColor: Color,
+        usesRetroTypography: Bool,
+        fontOverride: Font? = nil
+    ) {
+        self.attributed = attributed
+        self.fallback = fallback
+        self.foregroundColor = foregroundColor
+        self.usesRetroTypography = usesRetroTypography
+        self.fontOverride = fontOverride
+    }
 
     var body: some View {
         Group {
@@ -506,7 +710,7 @@ private struct MarkdownInlineText: View {
                 Text(fallback)
             }
         }
-        .font(usesRetroTypography ? RetroChatStyle.bodyFont : .system(size: 17))
+        .font(fontOverride ?? (usesRetroTypography ? RetroChatStyle.bodyFont : .system(size: 17)))
         .foregroundStyle(foregroundColor)
     }
 }
@@ -620,6 +824,86 @@ private struct MarkdownBlockquoteView: View {
                 }
                 .padding(.leading, 13)
             }
+        }
+    }
+}
+
+private struct MarkdownTableView: View {
+    let tableData: MarkdownContentView.TableData
+    let foregroundColor: Color
+    let usesRetroTypography: Bool
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(Array(tableData.headers.enumerated()), id: \.offset) { index, header in
+                        headerCell(header, index: index)
+                    }
+                }
+                .background(Color(.systemGray5))
+
+                Divider()
+
+                ForEach(Array(tableData.rows.enumerated()), id: \.offset) { _, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { index, cell in
+                            dataCell(cell, index: index)
+                        }
+                    }
+                    Divider()
+                }
+            }
+        }
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func headerCell(_ cell: MarkdownContentView.TableCell, index: Int) -> some View {
+        MarkdownInlineText(
+            attributed: cell.attributed,
+            fallback: cell.raw,
+            foregroundColor: foregroundColor,
+            usesRetroTypography: usesRetroTypography,
+            fontOverride: usesRetroTypography ? RetroChatStyle.bodyFont : .system(size: 15, weight: .semibold)
+        )
+        .frame(maxWidth: .infinity, alignment: alignment(for: index))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .gridColumnAlignment(alignment(for: index).toHorizontalAlignment)
+    }
+
+    private func dataCell(_ cell: MarkdownContentView.TableCell, index: Int) -> some View {
+        MarkdownInlineText(
+            attributed: cell.attributed,
+            fallback: cell.raw,
+            foregroundColor: foregroundColor,
+            usesRetroTypography: usesRetroTypography,
+            fontOverride: usesRetroTypography ? RetroChatStyle.bodyFont : .system(size: 15)
+        )
+        .frame(maxWidth: .infinity, alignment: alignment(for: index))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .gridColumnAlignment(alignment(for: index).toHorizontalAlignment)
+    }
+
+    private func alignment(for index: Int) -> Alignment {
+        guard index < tableData.alignments.count else { return .leading }
+        switch tableData.alignments[index] {
+        case .left: return .leading
+        case .center: return .center
+        case .right: return .trailing
+        }
+    }
+}
+
+private extension Alignment {
+    var toHorizontalAlignment: HorizontalAlignment {
+        switch self {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
+        default: return .leading
         }
     }
 }
