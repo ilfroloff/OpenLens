@@ -33,9 +33,6 @@ struct MarkdownContentView: View {
         qos: .utility
     )
 
-    /// Maximum characters per table cell before truncation. Prevents a single
-    /// enormous cell from forcing an expensive Text layout pass.
-    private static let maxTableCellLength = 500
     /// Number of blocks currently visible (nil = show all).
     @State private var visibleBlockCount: Int?
 
@@ -341,8 +338,7 @@ struct MarkdownContentView: View {
                 let columnCount = headerStrings.count
                 let alignments = parseTableSeparator(lines[i + 1], columnCount: columnCount)
                 let headers = headerStrings.enumerated().map { index, text in
-                    let bounded = boundedTableCell(text)
-                    return TableCell(id: index, attributed: makeAttributed(bounded), raw: bounded)
+                    return TableCell(id: index, attributed: makeAttributed(text), raw: text)
                 }
                 i += 2
                 var rows: [[TableCell]] = []
@@ -352,8 +348,7 @@ struct MarkdownContentView: View {
                     // Pad short rows to match header column count
                     let padded = padRow(cellStrings, to: columnCount)
                     let cells = padded.map { text in
-                        let bounded = boundedTableCell(text)
-                        let cell = TableCell(id: cellID, attributed: makeAttributed(bounded), raw: bounded)
+                        let cell = TableCell(id: cellID, attributed: makeAttributed(text), raw: text)
                         cellID += 1
                         return cell
                     }
@@ -608,15 +603,6 @@ struct MarkdownContentView: View {
         }
     }
 
-    /// Truncates a table cell's text to `maxTableCellLength` characters,
-    /// appending an ellipsis if truncated. Applied at parse time so both
-    /// the raw and attributed representations are bounded.
-    private static func boundedTableCell(_ text: String) -> String {
-        guard text.count > Self.maxTableCellLength else { return text }
-        let end = text.index(text.startIndex, offsetBy: Self.maxTableCellLength)
-        return String(text[..<end]) + "…"
-    }
-
     private static func parseTableSeparator(_ line: String, columnCount: Int) -> [ColumnAlignment] {
         let cells = parseTableRow(line)
         return cells.prefix(columnCount).map { cell in
@@ -843,61 +829,30 @@ private struct MarkdownBlockquoteView: View {
 }
 
 private struct MarkdownTableView: View {
-    private static let initialRowLimit = 20
-    private static let expandStep = 20
-
     let tableData: MarkdownContentView.TableData
     let foregroundColor: Color
     let usesRetroTypography: Bool
 
-    @State private var visibleRowCount: Int?
-
-    private var shownRowCount: Int {
-        min(visibleRowCount ?? Self.initialRowLimit, tableData.rows.count)
-    }
-
-    private var isTruncated: Bool {
-        shownRowCount < tableData.rows.count
-    }
-
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: true) {
-                Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+        ScrollView(.horizontal, showsIndicators: true) {
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(Array(tableData.headers.enumerated()), id: \.offset) { index, header in
+                        headerCell(header, index: index)
+                    }
+                }
+                .background(Color(.systemGray5))
+
+                Divider()
+
+                ForEach(Array(tableData.rows.enumerated()), id: \.offset) { _, row in
                     GridRow {
-                        ForEach(Array(tableData.headers.enumerated()), id: \.offset) { index, header in
-                            headerCell(header, index: index)
+                        ForEach(Array(row.enumerated()), id: \.offset) { index, cell in
+                            dataCell(cell, index: index)
                         }
                     }
-                    .background(Color(.systemGray5))
-
                     Divider()
-
-                    ForEach(Array(tableData.rows.prefix(shownRowCount).enumerated()), id: \.offset) { _, row in
-                        GridRow {
-                            ForEach(Array(row.enumerated()), id: \.offset) { index, cell in
-                                dataCell(cell, index: index)
-                            }
-                        }
-                        Divider()
-                    }
                 }
-            }
-
-            if isTruncated {
-                Button {
-                    visibleRowCount = min(
-                        shownRowCount + Self.expandStep,
-                        tableData.rows.count
-                    )
-                } label: {
-                    Text(AppText.markdownShowMoreRows(tableData.rows.count - shownRowCount))
-                        .font(usesRetroTypography ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.leading, 8)
-                .padding(.top, 4)
-                .padding(.bottom, 4)
             }
         }
         .background(Color(.systemGray6))

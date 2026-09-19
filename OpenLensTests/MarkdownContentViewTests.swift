@@ -230,7 +230,7 @@ struct MarkdownContentViewTests {
     }
 
     @MainActor
-    @Test func longTableCellContentIsTruncated() async {
+    @Test func longTableCellContentIsPreservedInFull() async {
         let longContent = String(repeating: "x", count: 1000)
         let markdown = """
         | Header |
@@ -244,9 +244,9 @@ struct MarkdownContentViewTests {
             return
         }
 
-        // Cell should be truncated to 500 chars + ellipsis
-        #expect(data.rows[0][0].raw.count == 501)
-        #expect(data.rows[0][0].raw.hasSuffix("…"))
+        // Cell content is preserved in full — no truncation
+        #expect(data.rows[0][0].raw.count == 1000)
+        #expect(data.rows[0][0].raw == longContent)
     }
 
     @MainActor

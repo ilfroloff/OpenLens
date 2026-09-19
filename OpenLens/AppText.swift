@@ -351,10 +351,6 @@ enum AppText {
         "Show more (\(remainingCount) blocks)"
     }
 
-    static func markdownShowMoreRows(_ remainingCount: Int) -> String {
-        "Show more (\(remainingCount) rows)"
-    }
-
     static func streamingEarlierTextHidden(_ chunkCount: Int) -> String {
         "Earlier text is retained for the final response (\(chunkCount) chunks)"
     }
